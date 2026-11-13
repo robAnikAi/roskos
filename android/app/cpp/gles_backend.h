@@ -22,12 +22,31 @@ struct EglState {
 bool createEglState(ANativeWindow* window, EglState& state, bool vsync, std::string& error);
 void destroyEglState(EglState& state);
 
+/**
+ * «Грубые пиксели» (coarse shading): сцена рисуется в буфер в N раз меньший
+ * по каждой оси, затем растягивается на экран. Уменьшение в 2 раза по обеим
+ * осям — в 4 раза меньше работы фрагментного шейдера, в 4 раза — в 16.
+ * Цена — картинка мягче: один «большой пиксель» несёт один цвет.
+ */
+struct CoarseTarget {
+    GLuint framebuffer = 0;
+    GLuint colorTexture = 0;
+    GLuint depthRenderbuffer = 0;
+    int width = 0;
+    int height = 0;
+
+    bool ensure(int targetWidth, int targetHeight, std::string& error);
+    void destroy();
+    void begin() const;
+    void blitToScreen(int screenWidth, int screenHeight) const;
+};
+
 /** Прямой OpenGL ES 3.0: свой EGL-контекст, свой шейдер, свои матрицы. */
 class GlesBackend final : public Backend {
 public:
     ~GlesBackend() override;
 
-    bool init(ANativeWindow* window, int width, int height, bool vsync,
+    bool init(ANativeWindow* window, int width, int height, bool vsync, int coarseScale,
               std::string& error) override;
     void resize(int width, int height) override;
     void frame(float time) override;
@@ -37,8 +56,10 @@ private:
     void destroyGlResources();
 
     EglState egl_;
+    CoarseTarget coarseTarget_;
     int width_ = 1;
     int height_ = 1;
+    int coarseScale_ = 1;
     GLuint program_ = 0;
     GLuint vao_ = 0;
     GLuint vertexBuffer_ = 0;
@@ -61,12 +82,13 @@ static constexpr int kRoskosInstanceFloats = 28;  // mat4 (16) + mat3 (9) + 3 fl
  *
  * Конвейер batched-first: вся сцена уходит в GPU одним инстансным draw-вызовом,
  * матрицы инстансов лежат в одном динамическом VBO, свет считается на CPU.
+ * Плюс режим грубых пикселей (coarse shading) с апскейлом.
  */
 class RoskosBackend final : public Backend {
 public:
     ~RoskosBackend() override;
 
-    bool init(ANativeWindow* window, int width, int height, bool vsync,
+    bool init(ANativeWindow* window, int width, int height, bool vsync, int coarseScale,
               std::string& error) override;
     void resize(int width, int height) override;
     void frame(float time) override;
@@ -78,8 +100,10 @@ private:
     void updateLights(float time);
 
     EglState egl_;
+    CoarseTarget coarseTarget_;
     int width_ = 1;
     int height_ = 1;
+    int coarseScale_ = 1;
     GLuint program_ = 0;
     GLuint vao_ = 0;
     GLuint vertexBuffer_ = 0;

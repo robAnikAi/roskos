@@ -33,6 +33,7 @@ RoskosBackend::~RoskosBackend() {
 }
 
 void RoskosBackend::destroyGlResources() {
+    coarseTarget_.destroy();
     if (program_) glDeleteProgram(program_);
     if (vertexBuffer_) glDeleteBuffers(1, &vertexBuffer_);
     if (indexBuffer_) glDeleteBuffers(1, &indexBuffer_);
@@ -81,9 +82,10 @@ bool RoskosBackend::createInstanceBuffer(std::string& error) {
 }
 
 bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsync,
-                         std::string& error) {
+                         int coarseScale, std::string& error) {
     width_ = width > 0 ? width : 1;
     height_ = height > 0 ? height : 1;
+    coarseScale_ = coarseScale > 1 ? coarseScale : 1;
 
     if (!createEglState(window, egl_, vsync, error)) return false;
 
@@ -119,7 +121,7 @@ bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsyn
     sceneReady_ = true;
     lastTime_ = 0.0f;
 
-    LOGE("roSkos batched pipeline init ok: %s", glGetString(GL_RENDERER));
+    LOGE("roSkos batched pipeline init ok: %s (coarse=%dx)", glGetString(GL_RENDERER), coarseScale_);
     return true;
 }
 
@@ -201,7 +203,19 @@ void RoskosBackend::frame(float time) {
     }
     if (instanceCount == 0) return;
 
-    glViewport(0, 0, width_, height_);
+    // грубые пиксели: рисуем в уменьшенный буфер, потом растягиваем
+    bool coarse = false;
+    if (coarseScale_ > 1) {
+        std::string fboError;
+        coarse = coarseTarget_.ensure(width_ / coarseScale_, height_ / coarseScale_, fboError);
+    }
+    if (coarse) {
+        coarseTarget_.begin();
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, width_, height_);
+    }
+
     glClearColor(0.03f, 0.04f, 0.06f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -219,6 +233,10 @@ void RoskosBackend::frame(float time) {
     glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(indexCount_),
                             GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(instanceCount));
     glBindVertexArray(0);
+
+    if (coarse) {
+        coarseTarget_.blitToScreen(width_, height_);
+    }
 
     eglSwapBuffers(egl_.display, egl_.surface);
 }

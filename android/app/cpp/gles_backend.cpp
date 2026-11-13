@@ -2,12 +2,84 @@
 
 #include <android/log.h>
 
+#include <algorithm>
 #include <vector>
 
 #include "gles_shaders.h"
 
 #define LOG_TAG "roskos-gles"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// --- «грубые пиксели»: рендер в уменьшенный буфер + апскейл -----------------
+
+bool CoarseTarget::ensure(int targetWidth, int targetHeight, std::string& error) {
+    targetWidth = std::max(1, targetWidth);
+    targetHeight = std::max(1, targetHeight);
+
+    if (framebuffer != 0 && width == targetWidth && height == targetHeight) return true;
+    destroy();
+
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+
+    glGenTextures(1, &colorTexture);
+    glBindTexture(GL_TEXTURE_2D, colorTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, targetWidth, targetHeight, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0);
+
+    glGenRenderbuffers(1, &depthRenderbuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, depthRenderbuffer);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, targetWidth, targetHeight);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
+                              depthRenderbuffer);
+
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        LOGE("FBO грубого рендера неполный: 0x%x", status);
+        destroy();
+        error = "framebuffer грубого рендера неполный";
+        return false;
+    }
+
+    width = targetWidth;
+    height = targetHeight;
+    return true;
+}
+
+void CoarseTarget::destroy() {
+    if (framebuffer) glDeleteFramebuffers(1, &framebuffer);
+    if (colorTexture) glDeleteTextures(1, &colorTexture);
+    if (depthRenderbuffer) glDeleteRenderbuffers(1, &depthRenderbuffer);
+    framebuffer = colorTexture = depthRenderbuffer = 0;
+    width = height = 0;
+}
+
+void CoarseTarget::begin() const {
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glViewport(0, 0, width, height);
+}
+
+void CoarseTarget::blitToScreen(int screenWidth, int screenHeight) const {
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glDisable(GL_DEPTH_TEST);
+    glBlitFramebuffer(0, 0, width, height, 0, 0, screenWidth, screenHeight,
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glEnable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, screenWidth, screenHeight);
+}
+
+// --- EGL -------------------------------------------------------------------
 
 bool createEglState(ANativeWindow* window, EglState& state, bool vsync, std::string& error) {
     state.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -151,12 +223,15 @@ void glesUploadMesh(const DonutMesh& mesh, GLuint& vao, GLuint& vbo, GLuint& ibo
     glBindVertexArray(0);
 }
 
+// --- прямой GLES-бэкенд ----------------------------------------------------
+
 GlesBackend::~GlesBackend() {
     destroyGlResources();
     destroyEglState(egl_);
 }
 
 void GlesBackend::destroyGlResources() {
+    coarseTarget_.destroy();
     if (program_) glDeleteProgram(program_);
     if (vertexBuffer_) glDeleteBuffers(1, &vertexBuffer_);
     if (indexBuffer_) glDeleteBuffers(1, &indexBuffer_);
@@ -165,9 +240,10 @@ void GlesBackend::destroyGlResources() {
 }
 
 bool GlesBackend::init(ANativeWindow* window, int width, int height, bool vsync,
-                       std::string& error) {
+                       int coarseScale, std::string& error) {
     width_ = width > 0 ? width : 1;
     height_ = height > 0 ? height : 1;
+    coarseScale_ = coarseScale > 1 ? coarseScale : 1;
 
     if (!createEglState(window, egl_, vsync, error)) return false;
 
@@ -190,7 +266,7 @@ bool GlesBackend::init(ANativeWindow* window, int width, int height, bool vsync,
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
 
-    LOGE("GLES init ok: %s", glGetString(GL_RENDERER));
+    LOGE("GLES init ok: %s (coarse=%dx)", glGetString(GL_RENDERER), coarseScale_);
     return true;
 }
 
@@ -202,7 +278,19 @@ void GlesBackend::resize(int width, int height) {
 void GlesBackend::frame(float time) {
     if (egl_.display == EGL_NO_DISPLAY) return;
 
-    glViewport(0, 0, width_, height_);
+    bool coarse = false;
+    if (coarseScale_ > 1) {
+        std::string error;
+        coarse = coarseTarget_.ensure(width_ / coarseScale_, height_ / coarseScale_, error);
+    }
+
+    if (coarse) {
+        coarseTarget_.begin();
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, width_, height_);
+    }
+
     glClearColor(0.03f, 0.04f, 0.06f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -228,6 +316,10 @@ void GlesBackend::frame(float time) {
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indexCount_), GL_UNSIGNED_INT, nullptr);
     }
     glBindVertexArray(0);
+
+    if (coarse) {
+        coarseTarget_.blitToScreen(width_, height_);
+    }
 
     eglSwapBuffers(egl_.display, egl_.surface);
 }

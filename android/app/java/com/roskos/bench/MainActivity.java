@@ -23,8 +23,12 @@ import java.util.Locale;
  *
  * FPS считается по реальному времени между кадрами в нативном потоке: ничего
  * не дорисовывается и не подменяется. При включённом vsync потолок — частота
- * экрана (у большинства телефонов 60/120 Гц), поэтому для честного сравнения
- * потолка GPU есть переключатель vsync.
+ * экрана (60/120 Гц), поэтому есть переключатель vsync для честного замера
+ * потолка GPU.
+ *
+ * Второй переключатель — «грубые пиксели»: сцена рисуется в буфер в 2 или 4
+ * раза меньший по каждой оси и растягивается на экран. Это в 4 и 16 раз меньше
+ * работы фрагментного шейдера, но картинка мягче.
  */
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
@@ -41,6 +45,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static native String nativeStatus();
     private static native void nativeSetVsync(boolean on);
     private static native boolean nativeVsync();
+    private static native void nativeSetCoarse(int scale);
+    private static native int nativeCoarse();
 
     private static final String[] BACKEND_LABELS = {"1 · Vulkan", "2 · OpenGL", "3 · roSkos"};
 
@@ -49,8 +55,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView fpsView;
     private TextView statusView;
     private TextView vsyncView;
+    private TextView coarseView;
     private int backend = 1;
     private boolean vsync = true;
+    private int coarse = 1;
     private boolean surfaceReady = false;
     private boolean resumed = false;
 
@@ -94,21 +102,33 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         statusParams.setMargins(dp(22), dp(76), dp(20), 0);
         root.addView(statusView, statusParams);
 
-        vsyncView = new TextView(this);
-        vsyncView.setTextColor(Color.parseColor("#E6EEF8"));
-        vsyncView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-        vsyncView.setBackgroundColor(Color.parseColor("#33FFFFFF"));
-        vsyncView.setPadding(dp(10), dp(6), dp(10), dp(6));
+        LinearLayout chips = new LinearLayout(this);
+        chips.setOrientation(LinearLayout.VERTICAL);
+
+        vsyncView = makeChip();
         vsyncView.setOnClickListener(new android.view.View.OnClickListener() {
             @Override
             public void onClick(android.view.View view) {
                 setVsync(!vsync);
             }
         });
-        FrameLayout.LayoutParams vsyncParams =
+        chips.addView(vsyncView);
+
+        coarseView = makeChip();
+        coarseView.setOnClickListener(new android.view.View.OnClickListener() {
+            @Override
+            public void onClick(android.view.View view) {
+                setCoarse(coarse >= 4 ? 1 : (coarse >= 2 ? 4 : 2));
+            }
+        });
+        LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(-2, -2);
+        chipParams.topMargin = dp(6);
+        chips.addView(coarseView, chipParams);
+
+        FrameLayout.LayoutParams chipsParams =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
-        vsyncParams.setMargins(dp(22), dp(100), dp(20), 0);
-        root.addView(vsyncView, vsyncParams);
+        chipsParams.setMargins(dp(22), dp(100), dp(20), 0);
+        root.addView(chips, chipsParams);
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -138,8 +158,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         setContentView(root);
 
         vsync = nativeVsync();
+        coarse = nativeCoarse();
         updateVsyncLabel();
+        updateCoarseLabel();
         selectBackend(backend);
+    }
+
+    private TextView makeChip() {
+        TextView chip = new TextView(this);
+        chip.setTextColor(Color.parseColor("#E6EEF8"));
+        chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        chip.setBackgroundColor(Color.parseColor("#33FFFFFF"));
+        chip.setPadding(dp(10), dp(6), dp(10), dp(6));
+        return chip;
     }
 
     private void selectBackend(int index) {
@@ -156,6 +187,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (surfaceReady && resumed) startBackend();
     }
 
+    private void setCoarse(int scale) {
+        coarse = scale;
+        nativeSetCoarse(scale);
+        updateCoarseLabel();
+        if (surfaceReady && resumed) startBackend();
+    }
+
     private void updateVsyncLabel() {
         if (vsync) {
             vsyncView.setText("vsync: ВКЛ · потолок = частота экрана (нажмите, чтобы снять)");
@@ -164,11 +202,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }
     }
 
+    private void updateCoarseLabel() {
+        if (coarse <= 1) {
+            coarseView.setText("пиксели: 1×1 · полное разрешение (нажмите: 2×2)");
+        } else if (coarse == 2) {
+            coarseView.setText("пиксели: 2×2 · в 4 раза меньше работы (нажмите: 4×4)");
+        } else {
+            coarseView.setText("пиксели: 4×4 · в 16 раз меньше работы (нажмите: 1×1)");
+        }
+    }
+
     private void startBackend() {
         Surface surface = holder.getSurface();
         if (surface == null || !surface.isValid()) return;
         nativeStop();
         nativeSetVsync(vsync);
+        nativeSetCoarse(coarse);
         int width = Math.max(1, surfaceView.getWidth());
         int height = Math.max(1, surfaceView.getHeight());
         if (!nativeStart(surface, backend, width, height)) {
