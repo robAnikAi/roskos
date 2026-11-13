@@ -52,7 +52,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static native void nativeSetVertexLit(boolean on);
     private static native boolean nativeVertexLit();
 
-    private static final String[] BACKEND_LABELS = {"1 · Vulkan", "2 · OpenGL", "3 · roSkos"};
+    private static final String[] BACKEND_LABELS = {
+            "1 · Vulkan", "2 · OpenGL", "3 · roSkos", "4 · Мир", "5 · Мир+"
+    };
 
     private SurfaceView surfaceView;
     private SurfaceHolder holder;
@@ -162,7 +164,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 }
             });
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1f);
-            params.setMargins(dp(5), 0, dp(5), 0);
+            params.setMargins(dp(3), 0, dp(3), 0);
+            button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+            button.setPadding(dp(2), dp(6), dp(2), dp(6));
+            button.setMinWidth(0);
+            button.setMinimumWidth(0);
             buttons.addView(button, params);
         }
 

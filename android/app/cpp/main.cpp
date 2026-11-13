@@ -14,6 +14,7 @@
 #include "backend.h"
 #include "gles_backend.h"
 #include "vulkan_backend.h"
+#include "world_backend.h"
 
 #define LOG_TAG "roskos-bench"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -63,6 +64,8 @@ void stopThread() {
 std::unique_ptr<Backend> createBackend(int backendId) {
     if (backendId == 0) return std::unique_ptr<Backend>(new VulkanBackend());
     if (backendId == 2) return std::unique_ptr<Backend>(new RoskosBackend());
+    if (backendId == 3) return std::unique_ptr<Backend>(new WorldBackend(false));
+    if (backendId == 4) return std::unique_ptr<Backend>(new WorldBackend(true));
     return std::unique_ptr<Backend>(new GlesBackend());
 }
 

@@ -44,6 +44,7 @@ SOURCES=(
   "$APP_DIR/cpp/common.cpp"
   "$APP_DIR/cpp/gles_backend.cpp"
   "$APP_DIR/cpp/roskos_backend.cpp"
+  "$APP_DIR/cpp/world_backend.cpp"
   "$APP_DIR/cpp/vulkan_setup.cpp"
   "$APP_DIR/cpp/vulkan_render.cpp"
   "$APP_DIR/cpp/main.cpp"
