@@ -1,0 +1,8 @@
+node_modules
+dist
+crates/roskos-core/target
+.DS_Store
+*.local
+android/build
+*.apk
+*.zip

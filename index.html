@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%237dd3fc'/%3E%3C/svg%3E"
+    />
+    <title>roSkos · низкоуровневый движок рендеринга</title>
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+
+    <div class="hud hud--top">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true"></span>
+        <span class="brand__name">roSkos</span>
+        <em class="brand__tag">rust core · webgl2</em>
+      </div>
+      <div class="stats">
+        <div class="stat"><span>fps</span><b id="stat-fps">—</b></div>
+        <div class="stat"><span>кадр</span><b id="stat-frame">—</b></div>
+        <div class="stat"><span>разрешение</span><b id="stat-res">—</b></div>
+        <div class="stat"><span>msaa</span><b id="stat-msaa">—</b></div>
+        <div class="stat"><span>draw calls</span><b id="stat-draws">—</b></div>
+        <div class="stat"><span>треугольники</span><b id="stat-tris">—</b></div>
+      </div>
+    </div>
+
+    <div class="hud hud--bottom">
+      <div class="hint">
+        <kbd>ЛКМ</kbd> вращение<span class="sep">·</span><kbd>колесо</kbd> зум<span class="sep">·</span
+        ><kbd>Space</kbd> пауза<span class="sep">·</span><kbd>P</kbd> постобработка<span class="sep">·</span
+        ><kbd>M</kbd> MSAA
+      </div>
+      <div class="device" id="stat-gpu">инициализация…</div>
+    </div>
+
+    <div class="fatal" id="fatal" hidden>
+      <div class="fatal__card">
+        <h1 id="fatal-title">Не удалось запустить движок</h1>
+        <p id="fatal-text"></p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

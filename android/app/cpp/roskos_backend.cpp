@@ -1,0 +1,224 @@
+#include "gles_backend.h"
+
+#include <android/log.h>
+
+#include <algorithm>
+#include <cstring>
+
+#include "roskos_abi.h"
+
+#define LOG_TAG "roskos-core"
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// Формат командного потока ядра, см. crates/roskos-core/src/frame.rs
+static constexpr uint32_t kFrameStride = 65;
+static constexpr uint32_t kLightStride = 7;
+static constexpr uint32_t kDrawStride = 39;
+static constexpr uint32_t kCommandFrame = 1;
+static constexpr uint32_t kCommandLight = 2;
+static constexpr uint32_t kCommandDraw = 3;
+
+static constexpr size_t kInstanceStride = kRoskosInstanceFloats * sizeof(float);
+
+// Цвета источников света: те же, что были зашиты в шейдер.
+static const float kLightColors[kRoskosLightCount][3] = {
+    {1.0f, 0.62f, 0.32f},
+    {0.32f, 0.72f, 1.0f},
+    {0.78f, 0.42f, 1.0f},
+};
+
+RoskosBackend::~RoskosBackend() {
+    destroyGlResources();
+    destroyEglState(egl_);
+}
+
+void RoskosBackend::destroyGlResources() {
+    if (program_) glDeleteProgram(program_);
+    if (vertexBuffer_) glDeleteBuffers(1, &vertexBuffer_);
+    if (indexBuffer_) glDeleteBuffers(1, &indexBuffer_);
+    if (instanceBuffer_) glDeleteBuffers(1, &instanceBuffer_);
+    if (vao_) glDeleteVertexArrays(1, &vao_);
+    program_ = vao_ = vertexBuffer_ = indexBuffer_ = instanceBuffer_ = 0;
+}
+
+/**
+ * Per-instance атрибуты: 4 колонки модели + 3 колонки нормальной матрицы.
+ * Обновляется один раз в кадр через glBufferSubData, а не uniform-вызовом
+ * на каждый объект.
+ */
+bool RoskosBackend::createInstanceBuffer(std::string& error) {
+    glGenBuffers(1, &instanceBuffer_);
+    if (instanceBuffer_ == 0) {
+        error = "не удалось создать буфер инстансов";
+        return false;
+    }
+
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, instanceBuffer_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(kRoskosMaxInstances * kInstanceStride),
+                 nullptr,
+                 GL_DYNAMIC_DRAW);
+
+    const GLsizei stride = static_cast<GLsizei>(kInstanceStride);
+    for (int i = 0; i < 4; ++i) {
+        const GLuint location = static_cast<GLuint>(3 + i);
+        glEnableVertexAttribArray(location);
+        glVertexAttribPointer(location, 4, GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<const void*>(static_cast<uintptr_t>(i * 16)));
+        glVertexAttribDivisor(location, 1);
+    }
+    for (int i = 0; i < 3; ++i) {
+        const GLuint location = static_cast<GLuint>(7 + i);
+        glEnableVertexAttribArray(location);
+        glVertexAttribPointer(location, 3, GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<const void*>(static_cast<uintptr_t>(64 + i * 12)));
+        glVertexAttribDivisor(location, 1);
+    }
+
+    glBindVertexArray(0);
+    return true;
+}
+
+bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsync,
+                         std::string& error) {
+    width_ = width > 0 ? width : 1;
+    height_ = height > 0 ? height : 1;
+
+    if (!createEglState(window, egl_, vsync, error)) return false;
+
+    program_ = glesLinkProgram(kRoskosVertexShader, kRoskosFragmentShader, error);
+    if (!program_) return false;
+
+    const DonutMesh mesh = buildDonut(1.0f, 0.38f, 512, 128);
+    glesUploadMesh(mesh, vao_, vertexBuffer_, indexBuffer_);
+    indexCount_ = mesh.indexCount();
+
+    if (!createInstanceBuffer(error)) return false;
+
+    uViewProjection_ = glGetUniformLocation(program_, "uViewProjection");
+    uCameraPosition_ = glGetUniformLocation(program_, "uCameraPosition");
+    uLightPosition_ = glGetUniformLocation(program_, "uLightPosition[0]");
+    uLightColor_ = glGetUniformLocation(program_, "uLightColor[0]");
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+
+    // Сцена создаётся в Rust-ядре: четыре узла с общим мешем и три источника света.
+    roskos_reset();
+    roskos_set_viewport(static_cast<uint32_t>(width_), static_cast<uint32_t>(height_));
+    for (int i = 0; i < DONUT_COUNT; ++i) {
+        nodes_[i] = roskos_add_node(0);
+    }
+    for (int i = 0; i < kRoskosLightCount; ++i) {
+        lights_[i] = roskos_add_light(kLightColors[i][0], kLightColors[i][1], kLightColors[i][2]);
+    }
+
+    sceneReady_ = true;
+    lastTime_ = 0.0f;
+
+    LOGE("roSkos batched pipeline init ok: %s", glGetString(GL_RENDERER));
+    return true;
+}
+
+void RoskosBackend::resize(int width, int height) {
+    width_ = width > 0 ? width : 1;
+    height_ = height > 0 ? height : 1;
+    if (sceneReady_) {
+        roskos_set_viewport(static_cast<uint32_t>(width_), static_cast<uint32_t>(height_));
+    }
+}
+
+void RoskosBackend::updateLights(float time) {
+    for (int i = 0; i < kRoskosLightCount; ++i) {
+        const float phase = static_cast<float>(i) * (2.0f * PI / 3.0f);
+        const float x = cosf(time * 0.6f + phase) * 4.0f;
+        const float y = sinf(time * 0.45f + phase) * 2.0f + 1.6f;
+        const float z = sinf(time * 0.5f + phase) * 4.0f;
+        roskos_set_light(lights_[i], x, y, z,
+                         kLightColors[i][0], kLightColors[i][1], kLightColors[i][2]);
+    }
+}
+
+void RoskosBackend::frame(float time) {
+    if (!sceneReady_ || egl_.display == EGL_NO_DISPLAY) return;
+
+    const float dt = std::min(std::max(time - lastTime_, 0.0001f), 0.1f);
+    lastTime_ = time;
+
+    DonutInstance instances[DONUT_COUNT];
+    updateInstances(time, instances);
+
+    for (int i = 0; i < DONUT_COUNT; ++i) {
+        roskos_set_transform(nodes_[i],
+                             instances[i].position[0], instances[i].position[1], instances[i].position[2],
+                             instances[i].rotation[0], instances[i].rotation[1], instances[i].rotation[2],
+                             instances[i].scale, instances[i].scale, instances[i].scale);
+    }
+    updateLights(time);
+
+    // камера живёт в ядре; медленно облетаем сцену
+    roskos_camera_orbit(dt * 0.08f, 0.0f);
+    roskos_camera_update(dt);
+    roskos_build_frame(static_cast<double>(time));
+
+    const float* commands = roskos_frame_ptr();
+    const uint32_t count = roskos_command_count();
+    if (commands == nullptr || count < kFrameStride) return;
+    if (static_cast<uint32_t>(commands[0]) != kCommandFrame) return;
+
+    float lightPositions[kRoskosLightCount * 3] = {};
+    float lightColors[kRoskosLightCount * 3] = {};
+    uint32_t lightCount = 0;
+    uint32_t instanceCount = 0;
+
+    uint32_t offset = kFrameStride;
+    while (offset + 1 < count) {
+        const uint32_t type = static_cast<uint32_t>(commands[offset]);
+        if (type == kCommandLight) {
+            if (lightCount < kRoskosLightCount) {
+                std::memcpy(&lightPositions[lightCount * 3], commands + offset + 1, 3 * sizeof(float));
+                std::memcpy(&lightColors[lightCount * 3], commands + offset + 4, 3 * sizeof(float));
+                ++lightCount;
+            }
+            offset += kLightStride;
+            continue;
+        }
+        if (type != kCommandDraw) break;
+        if (instanceCount >= kRoskosMaxInstances) break;
+
+        float* dst = instanceData_ + instanceCount * kRoskosInstanceFloats;
+        std::memcpy(dst, commands + offset + 2, 16 * sizeof(float));
+        std::memcpy(dst + 16, commands + offset + 18, 9 * sizeof(float));
+        dst[25] = 0.0f;
+        dst[26] = 0.0f;
+        dst[27] = 0.0f;
+
+        ++instanceCount;
+        offset += kDrawStride;
+    }
+    if (instanceCount == 0) return;
+
+    glViewport(0, 0, width_, height_);
+    glClearColor(0.03f, 0.04f, 0.06f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(program_);
+    glUniformMatrix4fv(uViewProjection_, 1, GL_FALSE, commands + 1);
+    glUniform3fv(uCameraPosition_, 1, commands + 33);
+    glUniform3fv(uLightPosition_, static_cast<GLsizei>(lightCount), lightPositions);
+    glUniform3fv(uLightColor_, static_cast<GLsizei>(lightCount), lightColors);
+
+    glBindBuffer(GL_ARRAY_BUFFER, instanceBuffer_);
+    glBufferSubData(GL_ARRAY_BUFFER, 0,
+                    static_cast<GLsizeiptr>(instanceCount * kInstanceStride), instanceData_);
+
+    glBindVertexArray(vao_);
+    glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(indexCount_),
+                            GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(instanceCount));
+    glBindVertexArray(0);
+
+    eglSwapBuffers(egl_.display, egl_.surface);
+}
