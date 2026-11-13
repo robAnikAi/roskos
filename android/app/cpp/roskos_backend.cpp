@@ -125,9 +125,26 @@ bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsyn
 
     if (!buildPrograms(error)) return false;
 
-    const DonutMesh mesh = buildDonut(1.0f, 0.38f, 512, 128);
+    // LOD: тесселяция держится в той же пропорции, что и разрешение рендера.
+    // На 4x4 пикселей в 16 раз меньше, значит и треугольников нужно в 16 раз
+    // меньше — иначе на маленьком буфере упираемся в вершинный шейдер.
+    int majorSegments = 512;
+    int minorSegments = 128;
+    if (coarseScale_ >= 4) {
+        majorSegments = 128;
+        minorSegments = 32;
+    } else if (coarseScale_ == 2) {
+        majorSegments = 256;
+        minorSegments = 64;
+    }
+
+    const DonutMesh mesh = buildDonut(1.0f, 0.38f, majorSegments, minorSegments);
     glesUploadMesh(mesh, vao_, vertexBuffer_, indexBuffer_);
     indexCount_ = mesh.indexCount();
+
+    displayName_ = "roSkos · сетка " + std::to_string(majorSegments) + "×" +
+                   std::to_string(minorSegments) + " · " + std::to_string(mesh.vertexCount()) +
+                   " верш.";
 
     if (!createInstanceBuffer(error)) return false;
 
@@ -149,8 +166,9 @@ bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsyn
     sceneReady_ = true;
     lastTime_ = 0.0f;
 
-    LOGE("roSkos batched pipeline: %s (light=%s coarse=%dx)", glGetString(GL_RENDERER),
-         vertexLighting_ ? "vertex" : "pixel", coarseScale_);
+    LOGE("roSkos batched pipeline: %s (light=%s coarse=%dx mesh=%dx%d verts=%u)",
+         glGetString(GL_RENDERER), vertexLighting_ ? "vertex" : "pixel", coarseScale_,
+         majorSegments, minorSegments, mesh.vertexCount());
     return true;
 }
 

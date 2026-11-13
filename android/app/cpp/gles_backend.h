@@ -102,7 +102,7 @@ public:
               bool vertexLighting, std::string& error) override;
     void resize(int width, int height) override;
     void frame(float time) override;
-    const char* name() const override { return "roSkos (Rust core)"; }
+    const char* name() const override { return displayName_.c_str(); }
 
 private:
     void destroyGlResources();
@@ -124,6 +124,7 @@ private:
 
     RoskosProgram vertexLit_;
     RoskosProgram pixelLit_;
+    std::string displayName_ = "roSkos (Rust core)";
 
     uint32_t nodes_[DONUT_COUNT] = {};
     uint32_t lights_[kRoskosLightCount] = {};
