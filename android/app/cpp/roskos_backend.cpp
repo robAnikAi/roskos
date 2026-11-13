@@ -34,18 +34,51 @@ RoskosBackend::~RoskosBackend() {
 
 void RoskosBackend::destroyGlResources() {
     coarseTarget_.destroy();
-    if (program_) glDeleteProgram(program_);
+    if (vertexLit_.program) glDeleteProgram(vertexLit_.program);
+    if (pixelLit_.program) glDeleteProgram(pixelLit_.program);
     if (vertexBuffer_) glDeleteBuffers(1, &vertexBuffer_);
     if (indexBuffer_) glDeleteBuffers(1, &indexBuffer_);
     if (instanceBuffer_) glDeleteBuffers(1, &instanceBuffer_);
     if (vao_) glDeleteVertexArrays(1, &vao_);
-    program_ = vao_ = vertexBuffer_ = indexBuffer_ = instanceBuffer_ = 0;
+    vertexLit_ = RoskosProgram{};
+    pixelLit_ = RoskosProgram{};
+    vao_ = vertexBuffer_ = indexBuffer_ = instanceBuffer_ = 0;
+}
+
+static bool resolveProgram(RoskosProgram& target, const char* vertexSource,
+                           const char* fragmentSource, std::string& error) {
+    target.program = glesLinkProgram(vertexSource, fragmentSource, error);
+    if (!target.program) return false;
+    target.viewProjection = glGetUniformLocation(target.program, "uViewProjection");
+    target.cameraPosition = glGetUniformLocation(target.program, "uCameraPosition");
+    target.lightPosition = glGetUniformLocation(target.program, "uLightPosition[0]");
+    target.lightColor = glGetUniformLocation(target.program, "uLightColor[0]");
+    return true;
+}
+
+bool RoskosBackend::buildPrograms(std::string& error) {
+    if (!resolveProgram(pixelLit_, kRoskosPixelLitVertexShader, kRoskosPixelLitFragmentShader,
+                        error)) {
+        return false;
+    }
+
+    std::string vertexLitError;
+    if (vertexLighting_ &&
+        !resolveProgram(vertexLit_, kRoskosVertexShader, kRoskosVertexLitFragmentShader,
+                        vertexLitError)) {
+        // вершинный вариант не собрался — честно откатываемся на попиксельный
+        LOGE("вершинное освещение не собралось, откат на попиксельное: %s",
+             vertexLitError.c_str());
+        vertexLighting_ = false;
+    }
+    return true;
 }
 
 /**
  * Per-instance атрибуты: 4 колонки модели + 3 колонки нормальной матрицы.
- * Обновляется один раз в кадр через glBufferSubData, а не uniform-вызовом
- * на каждый объект.
+ * Буфер обновляется один раз в кадр через glBufferData (orphaning): старый
+ * блок памяти отдаётся драйверу и не ждёт, пока GPU дочитает его, поэтому
+ * CPU не встаёт в синхронизацию с кадром, который ещё рисуется.
  */
 bool RoskosBackend::createInstanceBuffer(std::string& error) {
     glGenBuffers(1, &instanceBuffer_);
@@ -82,26 +115,21 @@ bool RoskosBackend::createInstanceBuffer(std::string& error) {
 }
 
 bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsync,
-                         int coarseScale, std::string& error) {
+                         int coarseScale, bool vertexLighting, std::string& error) {
     width_ = width > 0 ? width : 1;
     height_ = height > 0 ? height : 1;
     coarseScale_ = coarseScale > 1 ? coarseScale : 1;
+    vertexLighting_ = vertexLighting;
 
     if (!createEglState(window, egl_, vsync, error)) return false;
 
-    program_ = glesLinkProgram(kRoskosVertexShader, kRoskosFragmentShader, error);
-    if (!program_) return false;
+    if (!buildPrograms(error)) return false;
 
     const DonutMesh mesh = buildDonut(1.0f, 0.38f, 512, 128);
     glesUploadMesh(mesh, vao_, vertexBuffer_, indexBuffer_);
     indexCount_ = mesh.indexCount();
 
     if (!createInstanceBuffer(error)) return false;
-
-    uViewProjection_ = glGetUniformLocation(program_, "uViewProjection");
-    uCameraPosition_ = glGetUniformLocation(program_, "uCameraPosition");
-    uLightPosition_ = glGetUniformLocation(program_, "uLightPosition[0]");
-    uLightColor_ = glGetUniformLocation(program_, "uLightColor[0]");
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -121,7 +149,8 @@ bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsyn
     sceneReady_ = true;
     lastTime_ = 0.0f;
 
-    LOGE("roSkos batched pipeline init ok: %s (coarse=%dx)", glGetString(GL_RENDERER), coarseScale_);
+    LOGE("roSkos batched pipeline: %s (light=%s coarse=%dx)", glGetString(GL_RENDERER),
+         vertexLighting_ ? "vertex" : "pixel", coarseScale_);
     return true;
 }
 
@@ -219,13 +248,18 @@ void RoskosBackend::frame(float time) {
     glClearColor(0.03f, 0.04f, 0.06f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glUseProgram(program_);
-    glUniformMatrix4fv(uViewProjection_, 1, GL_FALSE, commands + 1);
-    glUniform3fv(uCameraPosition_, 1, commands + 33);
-    glUniform3fv(uLightPosition_, static_cast<GLsizei>(lightCount), lightPositions);
-    glUniform3fv(uLightColor_, static_cast<GLsizei>(lightCount), lightColors);
+    const RoskosProgram& active = vertexLighting_ ? vertexLit_ : pixelLit_;
+    glUseProgram(active.program);
+    glUniformMatrix4fv(active.viewProjection, 1, GL_FALSE, commands + 1);
+    glUniform3fv(active.cameraPosition, 1, commands + 33);
+    glUniform3fv(active.lightPosition, static_cast<GLsizei>(lightCount), lightPositions);
+    glUniform3fv(active.lightColor, static_cast<GLsizei>(lightCount), lightColors);
 
+    // orphaning: новая память под кадр вместо ожидания предыдущего кадра
     glBindBuffer(GL_ARRAY_BUFFER, instanceBuffer_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(kRoskosMaxInstances * kInstanceStride),
+                 nullptr, GL_DYNAMIC_DRAW);
     glBufferSubData(GL_ARRAY_BUFFER, 0,
                     static_cast<GLsizeiptr>(instanceCount * kInstanceStride), instanceData_);
 

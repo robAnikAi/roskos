@@ -14,7 +14,7 @@ public:
     ~VulkanBackend() override;
 
     bool init(ANativeWindow* window, int width, int height, bool vsync, int coarseScale,
-              std::string& error) override;
+              bool vertexLighting, std::string& error) override;
     void resize(int width, int height) override;
     void frame(float time) override;
     const char* name() const override { return "Vulkan"; }

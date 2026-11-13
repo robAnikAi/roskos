@@ -16,8 +16,9 @@ public:
     virtual ~Backend() = default;
 
     /// coarseScale: 1 — обычные пиксели, 2/4 — грубые пиксели с апскейлом.
+    /// vertexLighting: считать свет в вершинах (только roSkos).
     virtual bool init(ANativeWindow* window, int width, int height, bool vsync,
-                      int coarseScale, std::string& error) = 0;
+                      int coarseScale, bool vertexLighting, std::string& error) = 0;
     virtual void resize(int width, int height) = 0;
     virtual void frame(float time) = 0;
     virtual const char* name() const = 0;

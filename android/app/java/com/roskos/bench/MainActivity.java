@@ -22,13 +22,15 @@ import java.util.Locale;
  * roSkos Donut Bench: три бэкенда, один и тот же пончик, счётчик FPS.
  *
  * FPS считается по реальному времени между кадрами в нативном потоке: ничего
- * не дорисовывается и не подменяется. При включённом vsync потолок — частота
- * экрана (60/120 Гц), поэтому есть переключатель vsync для честного замера
- * потолка GPU.
+ * не дорисовывается и не подменяется.
  *
- * Второй переключатель — «грубые пиксели»: сцена рисуется в буфер в 2 или 4
- * раза меньший по каждой оси и растягивается на экран. Это в 4 и 16 раз меньше
- * работы фрагментного шейдера, но картинка мягче.
+ * Переключатели:
+ *  - vsync: включён — потолок равен частоте экрана (60/120 Гц); выключен —
+ *    видно реальный потолок GPU;
+ *  - пиксели: 1×1 / 2×2 / 4×4 — рендер в уменьшенный буфер и апскейл
+ *    (в 4 и 16 раз меньше работы фрагментного шейдера, картинка мягче);
+ *  - свет: вершины / пиксели — для roSkos, считать освещение в вершинном
+ *    шейдере (быстрее) или в пиксельном (как в GLES-пути).
  */
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
@@ -47,6 +49,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static native boolean nativeVsync();
     private static native void nativeSetCoarse(int scale);
     private static native int nativeCoarse();
+    private static native void nativeSetVertexLit(boolean on);
+    private static native boolean nativeVertexLit();
 
     private static final String[] BACKEND_LABELS = {"1 · Vulkan", "2 · OpenGL", "3 · roSkos"};
 
@@ -56,9 +60,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView statusView;
     private TextView vsyncView;
     private TextView coarseView;
+    private TextView lightView;
     private int backend = 1;
     private boolean vsync = true;
     private int coarse = 1;
+    private boolean vertexLit = true;
     private boolean surfaceReady = false;
     private boolean resumed = false;
 
@@ -125,6 +131,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         chipParams.topMargin = dp(6);
         chips.addView(coarseView, chipParams);
 
+        lightView = makeChip();
+        lightView.setOnClickListener(new android.view.View.OnClickListener() {
+            @Override
+            public void onClick(android.view.View view) {
+                setVertexLit(!vertexLit);
+            }
+        });
+        chips.addView(lightView, chipParams);
+
         FrameLayout.LayoutParams chipsParams =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
         chipsParams.setMargins(dp(22), dp(100), dp(20), 0);
@@ -159,8 +174,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         vsync = nativeVsync();
         coarse = nativeCoarse();
-        updateVsyncLabel();
-        updateCoarseLabel();
+        vertexLit = nativeVertexLit();
+        updateChips();
         selectBackend(backend);
     }
 
@@ -182,34 +197,34 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void setVsync(boolean on) {
         vsync = on;
         nativeSetVsync(on);
-        updateVsyncLabel();
-        // режим презентации выбирается при создании бэкенда — перезапускаем его
+        updateChips();
         if (surfaceReady && resumed) startBackend();
     }
 
     private void setCoarse(int scale) {
         coarse = scale;
         nativeSetCoarse(scale);
-        updateCoarseLabel();
+        updateChips();
         if (surfaceReady && resumed) startBackend();
     }
 
-    private void updateVsyncLabel() {
-        if (vsync) {
-            vsyncView.setText("vsync: ВКЛ · потолок = частота экрана (нажмите, чтобы снять)");
-        } else {
-            vsyncView.setText("vsync: ВЫКЛ · реальный потолок GPU (нажмите, чтобы вернуть)");
-        }
+    private void setVertexLit(boolean on) {
+        vertexLit = on;
+        nativeSetVertexLit(on);
+        updateChips();
+        if (surfaceReady && resumed) startBackend();
     }
 
-    private void updateCoarseLabel() {
+    private void updateChips() {
+        vsyncView.setText(vsync ? "vsync: ВКЛ · потолок экрана" : "vsync: ВЫКЛ · потолок GPU");
         if (coarse <= 1) {
-            coarseView.setText("пиксели: 1×1 · полное разрешение (нажмите: 2×2)");
+            coarseView.setText("пиксели: 1×1 · полное разрешение");
         } else if (coarse == 2) {
-            coarseView.setText("пиксели: 2×2 · в 4 раза меньше работы (нажмите: 4×4)");
+            coarseView.setText("пиксели: 2×2 · в 4 раза меньше");
         } else {
-            coarseView.setText("пиксели: 4×4 · в 16 раз меньше работы (нажмите: 1×1)");
+            coarseView.setText("пиксели: 4×4 · в 16 раз меньше");
         }
+        lightView.setText(vertexLit ? "свет: вершины (roSkos)" : "свет: пиксели (roSkos)");
     }
 
     private void startBackend() {
@@ -218,6 +233,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         nativeStop();
         nativeSetVsync(vsync);
         nativeSetCoarse(coarse);
+        nativeSetVertexLit(vertexLit);
         int width = Math.max(1, surfaceView.getWidth());
         int height = Math.max(1, surfaceView.getHeight());
         if (!nativeStart(surface, backend, width, height)) {

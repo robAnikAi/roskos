@@ -240,10 +240,11 @@ void GlesBackend::destroyGlResources() {
 }
 
 bool GlesBackend::init(ANativeWindow* window, int width, int height, bool vsync,
-                       int coarseScale, std::string& error) {
+                       int coarseScale, bool vertexLighting, std::string& error) {
     width_ = width > 0 ? width : 1;
     height_ = height > 0 ? height : 1;
     coarseScale_ = coarseScale > 1 ? coarseScale : 1;
+    (void)vertexLighting;  // у прямого GLES-пути свет попиксельный, как в оригинале
 
     if (!createEglState(window, egl_, vsync, error)) return false;
 

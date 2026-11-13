@@ -32,6 +32,8 @@ std::atomic<float> g_frameMs{0.0f};
 std::atomic<bool> g_vsync{true};
 // 1 — обычные пиксели, 2/4 — «грубые пиксели» (рендер в уменьшенный буфер + апскейл).
 std::atomic<int> g_coarse{1};
+// true — свет в вершинном шейдере (roSkos), false — в пиксельном.
+std::atomic<bool> g_vertexLit{true};
 
 std::mutex g_statusMutex;
 std::string g_status = "ожидание";
@@ -64,15 +66,15 @@ std::unique_ptr<Backend> createBackend(int backendId) {
     return std::unique_ptr<Backend>(new GlesBackend());
 }
 
-void renderLoop(ANativeWindow* window, int backendId, bool vsync, int coarseScale, int width,
-                int height) {
+void renderLoop(ANativeWindow* window, int backendId, bool vsync, int coarseScale,
+                bool vertexLighting, int width, int height) {
     g_fps.store(0.0f);
     g_fpsAverage.store(0.0f);
     g_frameMs.store(0.0f);
 
     std::unique_ptr<Backend> backend = createBackend(backendId);
     std::string error;
-    if (!backend->init(window, width, height, vsync, coarseScale, error)) {
+    if (!backend->init(window, width, height, vsync, coarseScale, vertexLighting, error)) {
         setError(std::string(backend->name()) + ": " + error);
         backend.reset();
         ANativeWindow_release(window);
@@ -135,7 +137,8 @@ Java_com_roskos_bench_MainActivity_nativeStart(JNIEnv* env, jclass, jobject surf
     g_running.store(true);
 
     g_thread = std::thread(renderLoop, window, static_cast<int>(backendId), g_vsync.load(),
-                           g_coarse.load(), width > 0 ? width : 1, height > 0 ? height : 1);
+                           g_coarse.load(), g_vertexLit.load(),
+                           width > 0 ? width : 1, height > 0 ? height : 1);
     return JNI_TRUE;
 }
 
@@ -171,6 +174,16 @@ Java_com_roskos_bench_MainActivity_nativeSetCoarse(JNIEnv*, jclass, jint scale) 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_roskos_bench_MainActivity_nativeCoarse(JNIEnv*, jclass) {
     return static_cast<jint>(g_coarse.load());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_roskos_bench_MainActivity_nativeSetVertexLit(JNIEnv*, jclass, jboolean on) {
+    g_vertexLit.store(on == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_roskos_bench_MainActivity_nativeVertexLit(JNIEnv*, jclass) {
+    return g_vertexLit.load() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jfloat JNICALL

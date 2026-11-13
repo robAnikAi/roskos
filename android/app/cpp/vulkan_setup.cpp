@@ -719,12 +719,14 @@ bool VulkanBackend::createSyncObjects(std::string& error) {
 }
 
 bool VulkanBackend::init(ANativeWindow* window, int width, int height, bool vsync,
-                         int coarseScale, std::string& error) {
+                         int coarseScale, bool vertexLighting, std::string& error) {
     window_ = window;
     width_ = width > 0 ? width : 1;
     height_ = height > 0 ? height : 1;
     vsync_ = vsync;
-    (void)coarseScale;  // грубые пиксели пока только в GLES/roSkos
+    // грубые пиксели и вершинное освещение пока только в GLES/roSkos
+    (void)coarseScale;
+    (void)vertexLighting;
 
     if (!createInstance(error)) return false;
     if (!createSurface(window, error)) return false;

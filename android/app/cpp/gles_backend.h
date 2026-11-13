@@ -47,7 +47,7 @@ public:
     ~GlesBackend() override;
 
     bool init(ANativeWindow* window, int width, int height, bool vsync, int coarseScale,
-              std::string& error) override;
+              bool vertexLighting, std::string& error) override;
     void resize(int width, int height) override;
     void frame(float time) override;
     const char* name() const override { return "OpenGL ES 3.0"; }
@@ -77,11 +77,21 @@ private:
 static constexpr int kRoskosMaxInstances = 16;
 static constexpr int kRoskosInstanceFloats = 28;  // mat4 (16) + mat3 (9) + 3 float выравнивания
 
+/** Программа и её uniform-локации (у двух вариантов освещения они разные). */
+struct RoskosProgram {
+    GLuint program = 0;
+    GLint viewProjection = -1;
+    GLint cameraPosition = -1;
+    GLint lightPosition = -1;
+    GLint lightColor = -1;
+};
+
 /**
  * «Наш рендер»: ядро на Rust строит командный поток, GLES его исполняет.
  *
  * Конвейер batched-first: вся сцена уходит в GPU одним инстансным draw-вызовом,
  * матрицы инстансов лежат в одном динамическом VBO, свет считается на CPU.
+ * Освещение — либо в вершинах (по умолчанию), либо в пикселях.
  * Плюс режим грубых пикселей (coarse shading) с апскейлом.
  */
 class RoskosBackend final : public Backend {
@@ -89,7 +99,7 @@ public:
     ~RoskosBackend() override;
 
     bool init(ANativeWindow* window, int width, int height, bool vsync, int coarseScale,
-              std::string& error) override;
+              bool vertexLighting, std::string& error) override;
     void resize(int width, int height) override;
     void frame(float time) override;
     const char* name() const override { return "roSkos (Rust core)"; }
@@ -97,6 +107,7 @@ public:
 private:
     void destroyGlResources();
     bool createInstanceBuffer(std::string& error);
+    bool buildPrograms(std::string& error);
     void updateLights(float time);
 
     EglState egl_;
@@ -104,17 +115,15 @@ private:
     int width_ = 1;
     int height_ = 1;
     int coarseScale_ = 1;
-    GLuint program_ = 0;
+    bool vertexLighting_ = true;
     GLuint vao_ = 0;
     GLuint vertexBuffer_ = 0;
     GLuint indexBuffer_ = 0;
     GLuint instanceBuffer_ = 0;
     uint32_t indexCount_ = 0;
 
-    GLint uViewProjection_ = -1;
-    GLint uCameraPosition_ = -1;
-    GLint uLightPosition_ = -1;
-    GLint uLightColor_ = -1;
+    RoskosProgram vertexLit_;
+    RoskosProgram pixelLit_;
 
     uint32_t nodes_[DONUT_COUNT] = {};
     uint32_t lights_[kRoskosLightCount] = {};
