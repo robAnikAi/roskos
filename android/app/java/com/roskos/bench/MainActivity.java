@@ -19,18 +19,24 @@ import android.widget.TextView;
 import java.util.Locale;
 
 /**
- * roSkos Donut Bench: три бэкенда, один и тот же пончик, счётчик FPS.
+ * roSkos Donut Bench.
  *
- * FPS считается по реальному времени между кадрами в нативном потоке: ничего
- * не дорисовывается и не подменяется.
+ * Режимы:
+ *   1 · Vulkan      — прямое Vulkan-приложение;
+ *   2 · OpenGL      — GLES, объект за объектом, матрицы в uniform;
+ *   3 · roSkos      — те же шейдеры и геометрия, но один инстансный вызов;
+ *   4 · Мир         — блоки мира, вызов на каждый блок, смена uniform;
+ *   5 · Мир батч    — тот же мир и то же отсечение, один инстансный вызов.
  *
- * Переключатели:
- *  - vsync: включён — потолок равен частоте экрана (60/120 Гц); выключен —
- *    видно реальный потолок GPU;
- *  - пиксели: 1×1 / 2×2 / 4×4 — рендер в уменьшенный буфер и апскейл
- *    (в 4 и 16 раз меньше работы фрагментного шейдера, картинка мягче);
- *  - свет: вершины / пиксели — для roSkos, считать освещение в вершинном
- *    шейдере (быстрее) или в пиксельном (как в GLES-пути).
+ * Сравнение 2↔3 и 4↔5 честное: одинаковая сцена, одинаковая геометрия,
+ * одинаковые шейдеры. Отличается только способ отправки на GPU.
+ *
+ * Переключатели сверху:
+ *   vsync: включён — потолок равен частоте экрана; выключен — потолок GPU;
+ *   пиксели: 1×1 / 2×2 / 4×4 — рендер в уменьшенный буфер и апскейл (и LOD);
+ *   свет: вершины / пиксели — где считать освещение (одинаково для 2 и 3).
+ *
+ * FPS считается по реальному времени кадров в нативном потоке.
  */
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
@@ -53,8 +59,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static native boolean nativeVertexLit();
 
     private static final String[] BACKEND_LABELS = {
-            "1 · Vulkan", "2 · OpenGL", "3 · roSkos", "4 · Мир", "5 · Мир+"
+            "Vulkan", "OpenGL", "roSkos", "Мир (по блокам)", "Мир (батч)"
     };
+    private static final int[] ROW_ONE = {0, 1, 2};
+    private static final int[] ROW_TWO = {3, 4};
 
     private SurfaceView surfaceView;
     private SurfaceHolder holder;
@@ -63,6 +71,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView vsyncView;
     private TextView coarseView;
     private TextView lightView;
+
+    private final Button[] backendButtons = new Button[BACKEND_LABELS.length];
+
     private int backend = 1;
     private boolean vsync = true;
     private int coarse = 1;
@@ -85,6 +96,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.parseColor("#0B0F14"));
 
         surfaceView = new SurfaceView(this);
         holder = surfaceView.getHolder();
@@ -98,20 +110,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         fpsView.setText("— FPS");
         FrameLayout.LayoutParams fpsParams =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
-        fpsParams.setMargins(dp(20), dp(18), dp(20), 0);
+        fpsParams.setMargins(dp(20), dp(16), dp(20), 0);
         root.addView(fpsView, fpsParams);
 
         statusView = new TextView(this);
-        statusView.setTextColor(Color.parseColor("#B8C7DA"));
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+        statusView.setTextColor(Color.parseColor("#9FB3C8"));
+        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         statusView.setShadowLayer(8f, 0f, 2f, Color.BLACK);
+        statusView.setText("запуск…");
         FrameLayout.LayoutParams statusParams =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
         statusParams.setMargins(dp(22), dp(76), dp(20), 0);
         root.addView(statusView, statusParams);
 
         LinearLayout chips = new LinearLayout(this);
-        chips.setOrientation(LinearLayout.VERTICAL);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        chips.setGravity(Gravity.END);
 
         vsyncView = makeChip();
         vsyncView.setOnClickListener(new android.view.View.OnClickListener() {
@@ -130,7 +144,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
         });
         LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(-2, -2);
-        chipParams.topMargin = dp(6);
+        chipParams.leftMargin = dp(8);
         chips.addView(coarseView, chipParams);
 
         lightView = makeChip();
@@ -143,38 +157,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         chips.addView(lightView, chipParams);
 
         FrameLayout.LayoutParams chipsParams =
-                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
-        chipsParams.setMargins(dp(22), dp(100), dp(20), 0);
+                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+        chipsParams.setMargins(dp(20), dp(18), dp(20), 0);
         root.addView(chips, chipsParams);
 
-        LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.setGravity(Gravity.CENTER);
-        buttons.setPadding(dp(10), dp(10), dp(10), dp(26));
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(10), 0, dp(10), dp(14));
 
-        for (int i = 0; i < BACKEND_LABELS.length; i++) {
-            final int index = i;
-            Button button = new Button(this);
-            button.setText(BACKEND_LABELS[i]);
-            button.setAllCaps(false);
-            button.setOnClickListener(new android.view.View.OnClickListener() {
-                @Override
-                public void onClick(android.view.View view) {
-                    selectBackend(index);
-                }
-            });
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1f);
-            params.setMargins(dp(3), 0, dp(3), 0);
-            button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-            button.setPadding(dp(2), dp(6), dp(2), dp(6));
-            button.setMinWidth(0);
-            button.setMinimumWidth(0);
-            buttons.addView(button, params);
-        }
+        panel.addView(makeRow(ROW_ONE));
+        LinearLayout.LayoutParams rowGap = new LinearLayout.LayoutParams(-1, -2);
+        rowGap.topMargin = dp(8);
+        panel.addView(makeRow(ROW_TWO), rowGap);
 
-        FrameLayout.LayoutParams buttonsParams =
+        FrameLayout.LayoutParams panelParams =
                 new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
-        root.addView(buttons, buttonsParams);
+        root.addView(panel, panelParams);
 
         setContentView(root);
 
@@ -185,19 +183,52 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         selectBackend(backend);
     }
 
+    private LinearLayout makeRow(int[] indices) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        for (int index : indices) {
+            Button button = new Button(this);
+            button.setText(BACKEND_LABELS[index]);
+            button.setAllCaps(false);
+            button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+            button.setPadding(dp(2), dp(10), dp(2), dp(10));
+            button.setMinWidth(0);
+            button.setMinimumWidth(0);
+            button.setStateListAnimator(null);
+            button.setOnClickListener(new android.view.View.OnClickListener() {
+                @Override
+                public void onClick(android.view.View view) {
+                    selectBackend(index);
+                }
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1f);
+            params.setMargins(dp(4), 0, dp(4), 0);
+            row.addView(button, params);
+            backendButtons[index] = button;
+        }
+        return row;
+    }
+
     private TextView makeChip() {
         TextView chip = new TextView(this);
         chip.setTextColor(Color.parseColor("#E6EEF8"));
         chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-        chip.setBackgroundColor(Color.parseColor("#33FFFFFF"));
+        chip.setBackgroundColor(Color.parseColor("#26404E"));
         chip.setPadding(dp(10), dp(6), dp(10), dp(6));
         return chip;
     }
 
     private void selectBackend(int index) {
         backend = index;
+        for (int i = 0; i < backendButtons.length; i++) {
+            Button button = backendButtons[i];
+            if (button == null) continue;
+            boolean selected = i == index;
+            button.setBackgroundColor(selected ? Color.parseColor("#3D7EBB")
+                                               : Color.parseColor("#1B2530"));
+            button.setTextColor(selected ? Color.WHITE : Color.parseColor("#CFD8E3"));
+        }
         if (surfaceReady) startBackend();
-        statusView.setText("Бэкенд: " + BACKEND_LABELS[index] + " · замер…");
     }
 
     private void setVsync(boolean on) {
@@ -222,15 +253,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void updateChips() {
-        vsyncView.setText(vsync ? "vsync: ВКЛ · потолок экрана" : "vsync: ВЫКЛ · потолок GPU");
-        if (coarse <= 1) {
-            coarseView.setText("пиксели: 1×1 · полное разрешение");
-        } else if (coarse == 2) {
-            coarseView.setText("пиксели: 2×2 · в 4 раза меньше");
-        } else {
-            coarseView.setText("пиксели: 4×4 · в 16 раз меньше");
-        }
-        lightView.setText(vertexLit ? "свет: вершины (roSkos)" : "свет: пиксели (roSkos)");
+        vsyncView.setText(vsync ? "vsync: ВКЛ" : "vsync: ВЫКЛ");
+        vsyncView.setTextColor(vsync ? Color.parseColor("#E6EEF8") : Color.parseColor("#FFD479"));
+        coarseView.setText("пиксели: " + (coarse <= 1 ? "1×1" : (coarse == 2 ? "2×2" : "4×4")));
+        coarseView.setTextColor(coarse <= 1 ? Color.parseColor("#E6EEF8") : Color.parseColor("#FFD479"));
+        lightView.setText(vertexLit ? "свет: вершины" : "свет: пиксели");
     }
 
     private void startBackend() {
@@ -252,9 +279,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         float frameMs = nativeFrameMs();
         float average = nativeFpsAverage();
         fpsView.setText(String.format(Locale.US, "%.1f FPS", fps));
-        String status = nativeStatus();
-        statusView.setText(String.format(Locale.US, "%s · %.2f мс · средний %.1f FPS",
-                status, frameMs, average));
+        statusView.setText(String.format(Locale.US, "%s · %.2f мс · средний %.1f",
+                nativeStatus(), frameMs, average));
     }
 
     @Override

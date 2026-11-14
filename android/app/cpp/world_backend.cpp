@@ -320,7 +320,7 @@ bool WorldBackend::init(ANativeWindow* window, int width, int height, bool vsync
     glDisable(GL_CULL_FACE);
 
     ready_ = true;
-    displayName_ = optimized_ ? "Мир · наш путь" : "Мир · обычный путь";
+    displayName_ = optimized_ ? "Мир · один инстансный вызов" : "Мир · вызов на каждый блок";
     displayName_ += " · " + std::to_string(blocks_.size()) + " блоков";
 
     LOGE("world init ok: %s (optimized=%d blocks=%zu)", glGetString(GL_RENDERER),
@@ -421,11 +421,11 @@ void WorldBackend::frame(float time) {
 
     glBindVertexArray(vao_);
 
-    if (optimized_) {
-        const float maxDistance =
-            coarseScale_ >= 4 ? 34.0f : (coarseScale_ == 2 ? 46.0f : 1.0e9f);
-        const int visibleCount = cullBlocks(maxDistance);
+    // Одинаковое отсечение для обоих путей: множество блоков одно и то же,
+    // картинка тоже, разница только в способе отправки на GPU.
+    const int visibleCount = cullBlocks(1.0e9f);
 
+    if (optimized_) {
         glEnableVertexAttribArray(3);
         glEnableVertexAttribArray(4);
         glUniform1f(uInstanced_, 1.0f);
@@ -446,18 +446,20 @@ void WorldBackend::frame(float time) {
         glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(indexCount_),
                                 GL_UNSIGNED_SHORT, nullptr, visibleCount);
     } else {
-        // наивный путь: блоками, со сменой состояния на каждый блок
+        // базовая линия: тот же видимый набор, но вызов на каждый блок и
+        // смена матрицы/тайла в uniform перед каждым вызовом
         glDisableVertexAttribArray(3);
         glDisableVertexAttribArray(4);
         glUniform1f(uInstanced_, 0.0f);
 
-        for (const WorldBlock& block : blocks_) {
+        for (int i = 0; i < visibleCount; ++i) {
+            const float* block = instanceData_.data() + static_cast<size_t>(i) * 5;
             const float model[16] = {1.0f, 0.0f, 0.0f, 0.0f,
                                      0.0f, 1.0f, 0.0f, 0.0f,
                                      0.0f, 0.0f, 1.0f, 0.0f,
-                                     block.x, block.y, block.z, 1.0f};
+                                     block[0], block[1], block[2], 1.0f};
             glUniformMatrix4fv(uModel_, 1, GL_FALSE, model);
-            glUniform2f(uTileOffset_, block.tileU, block.tileV);
+            glUniform2f(uTileOffset_, block[3], block[4]);
             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indexCount_),
                            GL_UNSIGNED_SHORT, nullptr);
         }

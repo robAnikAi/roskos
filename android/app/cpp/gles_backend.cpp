@@ -10,6 +10,18 @@
 #define LOG_TAG "roskos-gles"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+int lodMajorSegments(int coarseScale) {
+    if (coarseScale >= 4) return 128;
+    if (coarseScale == 2) return 256;
+    return 512;
+}
+
+int lodMinorSegments(int coarseScale) {
+    if (coarseScale >= 4) return 32;
+    if (coarseScale == 2) return 64;
+    return 128;
+}
+
 // --- «грубые пиксели»: рендер в уменьшенный буфер + апскейл -----------------
 
 bool CoarseTarget::ensure(int targetWidth, int targetHeight, std::string& error) {
@@ -194,6 +206,20 @@ GLuint glesLinkProgram(const char* vertexSource, const char* fragmentSource, std
     return program;
 }
 
+bool glesLinkState(ProgramState& state, const char* vertexSource, const char* fragmentSource,
+                   std::string& error) {
+    state.program = glesLinkProgram(vertexSource, fragmentSource, error);
+    if (!state.program) return false;
+
+    state.viewProjection = glGetUniformLocation(state.program, "uViewProjection");
+    state.model = glGetUniformLocation(state.program, "uModel");
+    state.normalMatrix = glGetUniformLocation(state.program, "uNormalMatrix");
+    state.cameraPosition = glGetUniformLocation(state.program, "uCameraPosition");
+    state.lightPosition = glGetUniformLocation(state.program, "uLightPosition[0]");
+    state.lightColor = glGetUniformLocation(state.program, "uLightColor[0]");
+    return true;
+}
+
 void glesUploadMesh(const DonutMesh& mesh, GLuint& vao, GLuint& vbo, GLuint& ibo) {
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
@@ -223,7 +249,7 @@ void glesUploadMesh(const DonutMesh& mesh, GLuint& vao, GLuint& vbo, GLuint& ibo
     glBindVertexArray(0);
 }
 
-// --- прямой GLES-бэкенд ----------------------------------------------------
+// --- прямой GLES-бэкенд (базовая линия) ------------------------------------
 
 GlesBackend::~GlesBackend() {
     destroyGlResources();
@@ -232,42 +258,57 @@ GlesBackend::~GlesBackend() {
 
 void GlesBackend::destroyGlResources() {
     coarseTarget_.destroy();
-    if (program_) glDeleteProgram(program_);
+    if (vertexLit_.program) glDeleteProgram(vertexLit_.program);
+    if (pixelLit_.program) glDeleteProgram(pixelLit_.program);
     if (vertexBuffer_) glDeleteBuffers(1, &vertexBuffer_);
     if (indexBuffer_) glDeleteBuffers(1, &indexBuffer_);
     if (vao_) glDeleteVertexArrays(1, &vao_);
-    program_ = vao_ = vertexBuffer_ = indexBuffer_ = 0;
+    vertexLit_ = ProgramState{};
+    pixelLit_ = ProgramState{};
+    vao_ = vertexBuffer_ = indexBuffer_ = 0;
 }
 
-bool GlesBackend::init(ANativeWindow* window, int width, int height, bool vsync,
-                       int coarseScale, bool vertexLighting, std::string& error) {
+bool GlesBackend::buildPrograms(std::string& error) {
+    if (!glesLinkState(pixelLit_, kGlesPixelLitVertexShader, kRoskosPixelLitFragmentShader, error)) {
+        return false;
+    }
+    std::string vertexError;
+    if (vertexLighting_ &&
+        !glesLinkState(vertexLit_, kGlesVertexLitVertexShader, kRoskosVertexLitFragmentShader,
+                       vertexError)) {
+        LOGE("вершинное освещение (GLES) не собралось, откат: %s", vertexError.c_str());
+        vertexLighting_ = false;
+    }
+    return true;
+}
+
+bool GlesBackend::init(ANativeWindow* window, int width, int height, bool vsync, int coarseScale,
+                       bool vertexLighting, std::string& error) {
     width_ = width > 0 ? width : 1;
     height_ = height > 0 ? height : 1;
     coarseScale_ = coarseScale > 1 ? coarseScale : 1;
-    (void)vertexLighting;  // у прямого GLES-пути свет попиксельный, как в оригинале
+    vertexLighting_ = vertexLighting;
 
     if (!createEglState(window, egl_, vsync, error)) return false;
+    if (!buildPrograms(error)) return false;
 
-    program_ = glesLinkProgram(kGlesVertexShader, kGlesFragmentShader, error);
-    if (!program_) return false;
-
-    // 512 x 128 = 131 072 треугольника на пончик, четыре пончика в кадре.
-    const DonutMesh mesh = buildDonut(1.0f, 0.38f, 512, 128);
+    const int majorSegments = lodMajorSegments(coarseScale_);
+    const int minorSegments = lodMinorSegments(coarseScale_);
+    const DonutMesh mesh = buildDonut(1.0f, 0.38f, majorSegments, minorSegments);
     glesUploadMesh(mesh, vao_, vertexBuffer_, indexBuffer_);
     indexCount_ = mesh.indexCount();
-
-    uViewProjection_ = glGetUniformLocation(program_, "uViewProjection");
-    uModel_ = glGetUniformLocation(program_, "uModel");
-    uNormalMatrix_ = glGetUniformLocation(program_, "uNormalMatrix");
-    uCameraPosition_ = glGetUniformLocation(program_, "uCameraPosition");
-    uTime_ = glGetUniformLocation(program_, "uTime");
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
 
-    LOGE("GLES init ok: %s (coarse=%dx)", glGetString(GL_RENDERER), coarseScale_);
+    displayName_ = "OpenGL ES · сетка " + std::to_string(majorSegments) + "×" +
+                   std::to_string(minorSegments) + " · " + std::to_string(mesh.vertexCount()) +
+                   " верш.";
+
+    LOGE("GLES init ok: %s (light=%s coarse=%dx mesh=%dx%d)", glGetString(GL_RENDERER),
+         vertexLighting_ ? "vertex" : "pixel", coarseScale_, majorSegments, minorSegments);
     return true;
 }
 
@@ -281,10 +322,9 @@ void GlesBackend::frame(float time) {
 
     bool coarse = false;
     if (coarseScale_ > 1) {
-        std::string error;
-        coarse = coarseTarget_.ensure(width_ / coarseScale_, height_ / coarseScale_, error);
+        std::string fboError;
+        coarse = coarseTarget_.ensure(width_ / coarseScale_, height_ / coarseScale_, fboError);
     }
-
     if (coarse) {
         coarseTarget_.begin();
     } else {
@@ -298,10 +338,15 @@ void GlesBackend::frame(float time) {
     FrameData frameData;
     buildCamera(false, static_cast<float>(width_) / static_cast<float>(height_), time, &frameData);
 
-    glUseProgram(program_);
-    glUniformMatrix4fv(uViewProjection_, 1, GL_FALSE, frameData.viewProjection);
-    glUniform3fv(uCameraPosition_, 1, frameData.cameraPosition);
-    glUniform1f(uTime_, time);
+    float lightPositions[LIGHT_COUNT * 3];
+    computeLightPositions(time, lightPositions);
+
+    const ProgramState& active = vertexLighting_ ? vertexLit_ : pixelLit_;
+    glUseProgram(active.program);
+    glUniformMatrix4fv(active.viewProjection, 1, GL_FALSE, frameData.viewProjection);
+    glUniform3fv(active.cameraPosition, 1, frameData.cameraPosition);
+    glUniform3fv(active.lightPosition, LIGHT_COUNT, lightPositions);
+    glUniform3fv(active.lightColor, LIGHT_COUNT, &kLightColors[0][0]);
 
     DonutInstance instances[DONUT_COUNT];
     updateInstances(time, instances);
@@ -312,8 +357,8 @@ void GlesBackend::frame(float time) {
         float normal[9];
         mat4Compose(model, instances[i].position, instances[i].rotation, instances[i].scale);
         mat3NormalFromMat4(normal, model);
-        glUniformMatrix4fv(uModel_, 1, GL_FALSE, model);
-        glUniformMatrix3fv(uNormalMatrix_, 1, GL_FALSE, normal);
+        glUniformMatrix4fv(active.model, 1, GL_FALSE, model);
+        glUniformMatrix3fv(active.normalMatrix, 1, GL_FALSE, normal);
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indexCount_), GL_UNSIGNED_INT, nullptr);
     }
     glBindVertexArray(0);

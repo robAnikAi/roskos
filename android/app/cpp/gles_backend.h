@@ -4,6 +4,7 @@
 #include <GLES3/gl3.h>
 
 #include <cstdint>
+#include <string>
 
 #include "backend.h"
 #include "common.h"
@@ -12,6 +13,24 @@
 /** Общие помощники GLES: программа и загрузка меша в VAO. */
 GLuint glesLinkProgram(const char* vertexSource, const char* fragmentSource, std::string& error);
 void glesUploadMesh(const DonutMesh& mesh, GLuint& vao, GLuint& vbo, GLuint& ibo);
+
+/** Программа и её uniform-локации (у двух вариантов освещения они разные). */
+struct ProgramState {
+    GLuint program = 0;
+    GLint viewProjection = -1;
+    GLint model = -1;
+    GLint normalMatrix = -1;
+    GLint cameraPosition = -1;
+    GLint lightPosition = -1;
+    GLint lightColor = -1;
+};
+
+bool glesLinkState(ProgramState& state, const char* vertexSource, const char* fragmentSource,
+                   std::string& error);
+
+/** Тесселяция тора под масштаб рендера: пикселей в 16 раз меньше — вершин тоже. */
+int lodMajorSegments(int coarseScale);
+int lodMinorSegments(int coarseScale);
 
 struct EglState {
     EGLDisplay display = EGL_NO_DISPLAY;
@@ -24,9 +43,7 @@ void destroyEglState(EglState& state);
 
 /**
  * «Грубые пиксели» (coarse shading): сцена рисуется в буфер в N раз меньший
- * по каждой оси, затем растягивается на экран. Уменьшение в 2 раза по обеим
- * осям — в 4 раза меньше работы фрагментного шейдера, в 4 раза — в 16.
- * Цена — картинка мягче: один «большой пиксель» несёт один цвет.
+ * по каждой оси, затем растягивается на экран.
  */
 struct CoarseTarget {
     GLuint framebuffer = 0;
@@ -41,7 +58,11 @@ struct CoarseTarget {
     void blitToScreen(int screenWidth, int screenHeight) const;
 };
 
-/** Прямой OpenGL ES 3.0: свой EGL-контекст, свой шейдер, свои матрицы. */
+/**
+ * Прямой OpenGL ES 3.0: те же шейдеры и та же геометрия, что у roSkos,
+ * но объекты рисуются по одному, а матрицы едут через uniform.
+ * Это базовая линия для сравнения путей отправки.
+ */
 class GlesBackend final : public Backend {
 public:
     ~GlesBackend() override;
@@ -50,48 +71,36 @@ public:
               bool vertexLighting, std::string& error) override;
     void resize(int width, int height) override;
     void frame(float time) override;
-    const char* name() const override { return "OpenGL ES 3.0"; }
+    const char* name() const override { return displayName_.c_str(); }
 
 private:
     void destroyGlResources();
+    bool buildPrograms(std::string& error);
 
     EglState egl_;
     CoarseTarget coarseTarget_;
     int width_ = 1;
     int height_ = 1;
     int coarseScale_ = 1;
-    GLuint program_ = 0;
+    bool vertexLighting_ = true;
+    std::string displayName_ = "OpenGL ES 3.0";
+
+    ProgramState vertexLit_;
+    ProgramState pixelLit_;
+
     GLuint vao_ = 0;
     GLuint vertexBuffer_ = 0;
     GLuint indexBuffer_ = 0;
     uint32_t indexCount_ = 0;
-
-    GLint uViewProjection_ = -1;
-    GLint uModel_ = -1;
-    GLint uNormalMatrix_ = -1;
-    GLint uCameraPosition_ = -1;
-    GLint uTime_ = -1;
 };
 
-/** Сколько инстансов и сколько float на инстанс в общем буфере. */
+/** Сколько инстансов и сколько float на инстанс в общем буфере roSkos. */
 static constexpr int kRoskosMaxInstances = 16;
 static constexpr int kRoskosInstanceFloats = 28;  // mat4 (16) + mat3 (9) + 3 float выравнивания
 
-/** Программа и её uniform-локации (у двух вариантов освещения они разные). */
-struct RoskosProgram {
-    GLuint program = 0;
-    GLint viewProjection = -1;
-    GLint cameraPosition = -1;
-    GLint lightPosition = -1;
-    GLint lightColor = -1;
-};
-
 /**
- * «Наш рендер»: ядро на Rust строит командный поток, GLES его исполняет.
- *
- * Конвейер batched-first: вся сцена уходит в GPU одним инстансным draw-вызовом,
- * матрицы инстансов лежат в одном динамическом VBO, свет считается на CPU.
- * Освещение — либо в вершинах (по умолчанию), либо в пикселях.
+ * «Наш рендер»: та же сцена и те же шейдеры, что у GlesBackend, но вся сцена
+ * уходит одним инстансным draw-вызовом, а матрицы лежат per-instance.
  * Плюс режим грубых пикселей (coarse shading) с апскейлом.
  */
 class RoskosBackend final : public Backend {
@@ -108,7 +117,6 @@ private:
     void destroyGlResources();
     bool createInstanceBuffer(std::string& error);
     bool buildPrograms(std::string& error);
-    void updateLights(float time);
 
     EglState egl_;
     CoarseTarget coarseTarget_;
@@ -122,12 +130,12 @@ private:
     GLuint instanceBuffer_ = 0;
     uint32_t indexCount_ = 0;
 
-    RoskosProgram vertexLit_;
-    RoskosProgram pixelLit_;
+    ProgramState vertexLit_;
+    ProgramState pixelLit_;
     std::string displayName_ = "roSkos (Rust core)";
 
     uint32_t nodes_[DONUT_COUNT] = {};
-    uint32_t lights_[kRoskosLightCount] = {};
+    uint32_t lights_[LIGHT_COUNT] = {};
     float instanceData_[kRoskosMaxInstances * kRoskosInstanceFloats] = {};
     float lastTime_ = 0.0f;
     bool sceneReady_ = false;

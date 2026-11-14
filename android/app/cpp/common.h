@@ -9,7 +9,14 @@
 /** Общая «сцена» для всех трёх бэкендов: один и тот же пончик, одни и те же матрицы. */
 
 constexpr int DONUT_COUNT = 4;
+constexpr int LIGHT_COUNT = 3;
 constexpr float PI = 3.14159265358979f;
+
+/** Цвета источников света — общие для всех бэкендов, чтобы картинка совпадала. */
+extern const float kLightColors[LIGHT_COUNT][3];
+
+/** Позиции источников на момент времени time (те же формулы в обоих путях). */
+void computeLightPositions(float time, float outPositions[LIGHT_COUNT * 3]);
 
 struct DonutMesh {
     std::vector<float> vertices;   // pos(3) + normal(3) + uv(2)

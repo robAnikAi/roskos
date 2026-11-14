@@ -20,13 +20,6 @@ static constexpr uint32_t kCommandDraw = 3;
 
 static constexpr size_t kInstanceStride = kRoskosInstanceFloats * sizeof(float);
 
-// Цвета источников света: те же, что были зашиты в шейдер.
-static const float kLightColors[kRoskosLightCount][3] = {
-    {1.0f, 0.62f, 0.32f},
-    {0.32f, 0.72f, 1.0f},
-    {0.78f, 0.42f, 1.0f},
-};
-
 RoskosBackend::~RoskosBackend() {
     destroyGlResources();
     destroyEglState(egl_);
@@ -40,35 +33,23 @@ void RoskosBackend::destroyGlResources() {
     if (indexBuffer_) glDeleteBuffers(1, &indexBuffer_);
     if (instanceBuffer_) glDeleteBuffers(1, &instanceBuffer_);
     if (vao_) glDeleteVertexArrays(1, &vao_);
-    vertexLit_ = RoskosProgram{};
-    pixelLit_ = RoskosProgram{};
+    vertexLit_ = ProgramState{};
+    pixelLit_ = ProgramState{};
     vao_ = vertexBuffer_ = indexBuffer_ = instanceBuffer_ = 0;
 }
 
-static bool resolveProgram(RoskosProgram& target, const char* vertexSource,
-                           const char* fragmentSource, std::string& error) {
-    target.program = glesLinkProgram(vertexSource, fragmentSource, error);
-    if (!target.program) return false;
-    target.viewProjection = glGetUniformLocation(target.program, "uViewProjection");
-    target.cameraPosition = glGetUniformLocation(target.program, "uCameraPosition");
-    target.lightPosition = glGetUniformLocation(target.program, "uLightPosition[0]");
-    target.lightColor = glGetUniformLocation(target.program, "uLightColor[0]");
-    return true;
-}
-
 bool RoskosBackend::buildPrograms(std::string& error) {
-    if (!resolveProgram(pixelLit_, kRoskosPixelLitVertexShader, kRoskosPixelLitFragmentShader,
-                        error)) {
+    if (!glesLinkState(pixelLit_, kRoskosPixelLitVertexShader, kRoskosPixelLitFragmentShader,
+                       error)) {
         return false;
     }
-
-    std::string vertexLitError;
+    std::string vertexError;
     if (vertexLighting_ &&
-        !resolveProgram(vertexLit_, kRoskosVertexShader, kRoskosVertexLitFragmentShader,
-                        vertexLitError)) {
+        !glesLinkState(vertexLit_, kRoskosVertexShader, kRoskosVertexLitFragmentShader,
+                       vertexError)) {
         // вершинный вариант не собрался — честно откатываемся на попиксельный
         LOGE("вершинное освещение не собралось, откат на попиксельное: %s",
-             vertexLitError.c_str());
+             vertexError.c_str());
         vertexLighting_ = false;
     }
     return true;
@@ -122,29 +103,14 @@ bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsyn
     vertexLighting_ = vertexLighting;
 
     if (!createEglState(window, egl_, vsync, error)) return false;
-
     if (!buildPrograms(error)) return false;
 
-    // LOD: тесселяция держится в той же пропорции, что и разрешение рендера.
-    // На 4x4 пикселей в 16 раз меньше, значит и треугольников нужно в 16 раз
-    // меньше — иначе на маленьком буфере упираемся в вершинный шейдер.
-    int majorSegments = 512;
-    int minorSegments = 128;
-    if (coarseScale_ >= 4) {
-        majorSegments = 128;
-        minorSegments = 32;
-    } else if (coarseScale_ == 2) {
-        majorSegments = 256;
-        minorSegments = 64;
-    }
-
+    // та же тесселяция, что у базового GLES-пути: сравнение честное
+    const int majorSegments = lodMajorSegments(coarseScale_);
+    const int minorSegments = lodMinorSegments(coarseScale_);
     const DonutMesh mesh = buildDonut(1.0f, 0.38f, majorSegments, minorSegments);
     glesUploadMesh(mesh, vao_, vertexBuffer_, indexBuffer_);
     indexCount_ = mesh.indexCount();
-
-    displayName_ = "roSkos · сетка " + std::to_string(majorSegments) + "×" +
-                   std::to_string(minorSegments) + " · " + std::to_string(mesh.vertexCount()) +
-                   " верш.";
 
     if (!createInstanceBuffer(error)) return false;
 
@@ -159,12 +125,16 @@ bool RoskosBackend::init(ANativeWindow* window, int width, int height, bool vsyn
     for (int i = 0; i < DONUT_COUNT; ++i) {
         nodes_[i] = roskos_add_node(0);
     }
-    for (int i = 0; i < kRoskosLightCount; ++i) {
+    for (int i = 0; i < LIGHT_COUNT; ++i) {
         lights_[i] = roskos_add_light(kLightColors[i][0], kLightColors[i][1], kLightColors[i][2]);
     }
 
     sceneReady_ = true;
     lastTime_ = 0.0f;
+
+    displayName_ = "roSkos · сетка " + std::to_string(majorSegments) + "×" +
+                   std::to_string(minorSegments) + " · " + std::to_string(mesh.vertexCount()) +
+                   " верш.";
 
     LOGE("roSkos batched pipeline: %s (light=%s coarse=%dx mesh=%dx%d verts=%u)",
          glGetString(GL_RENDERER), vertexLighting_ ? "vertex" : "pixel", coarseScale_,
@@ -177,17 +147,6 @@ void RoskosBackend::resize(int width, int height) {
     height_ = height > 0 ? height : 1;
     if (sceneReady_) {
         roskos_set_viewport(static_cast<uint32_t>(width_), static_cast<uint32_t>(height_));
-    }
-}
-
-void RoskosBackend::updateLights(float time) {
-    for (int i = 0; i < kRoskosLightCount; ++i) {
-        const float phase = static_cast<float>(i) * (2.0f * PI / 3.0f);
-        const float x = cosf(time * 0.6f + phase) * 4.0f;
-        const float y = sinf(time * 0.45f + phase) * 2.0f + 1.6f;
-        const float z = sinf(time * 0.5f + phase) * 4.0f;
-        roskos_set_light(lights_[i], x, y, z,
-                         kLightColors[i][0], kLightColors[i][1], kLightColors[i][2]);
     }
 }
 
@@ -206,7 +165,15 @@ void RoskosBackend::frame(float time) {
                              instances[i].rotation[0], instances[i].rotation[1], instances[i].rotation[2],
                              instances[i].scale, instances[i].scale, instances[i].scale);
     }
-    updateLights(time);
+
+    // позиции света считаем на CPU (те же формулы, что у GLES-пути) и отдаём ядру
+    float lightPositions[LIGHT_COUNT * 3];
+    computeLightPositions(time, lightPositions);
+    for (int i = 0; i < LIGHT_COUNT; ++i) {
+        roskos_set_light(lights_[i], lightPositions[i * 3 + 0], lightPositions[i * 3 + 1],
+                         lightPositions[i * 3 + 2],
+                         kLightColors[i][0], kLightColors[i][1], kLightColors[i][2]);
+    }
 
     // камера живёт в ядре; медленно облетаем сцену
     roskos_camera_orbit(dt * 0.08f, 0.0f);
@@ -218,8 +185,7 @@ void RoskosBackend::frame(float time) {
     if (commands == nullptr || count < kFrameStride) return;
     if (static_cast<uint32_t>(commands[0]) != kCommandFrame) return;
 
-    float lightPositions[kRoskosLightCount * 3] = {};
-    float lightColors[kRoskosLightCount * 3] = {};
+    float lightColors[LIGHT_COUNT * 3] = {};
     uint32_t lightCount = 0;
     uint32_t instanceCount = 0;
 
@@ -227,7 +193,7 @@ void RoskosBackend::frame(float time) {
     while (offset + 1 < count) {
         const uint32_t type = static_cast<uint32_t>(commands[offset]);
         if (type == kCommandLight) {
-            if (lightCount < kRoskosLightCount) {
+            if (lightCount < LIGHT_COUNT) {
                 std::memcpy(&lightPositions[lightCount * 3], commands + offset + 1, 3 * sizeof(float));
                 std::memcpy(&lightColors[lightCount * 3], commands + offset + 4, 3 * sizeof(float));
                 ++lightCount;
@@ -266,7 +232,7 @@ void RoskosBackend::frame(float time) {
     glClearColor(0.03f, 0.04f, 0.06f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    const RoskosProgram& active = vertexLighting_ ? vertexLit_ : pixelLit_;
+    const ProgramState& active = vertexLighting_ ? vertexLit_ : pixelLit_;
     glUseProgram(active.program);
     glUniformMatrix4fv(active.viewProjection, 1, GL_FALSE, commands + 1);
     glUniform3fv(active.cameraPosition, 1, commands + 33);

@@ -1,5 +1,20 @@
 #include "common.h"
 
+const float kLightColors[LIGHT_COUNT][3] = {
+    {1.0f, 0.62f, 0.32f},
+    {0.32f, 0.72f, 1.0f},
+    {0.78f, 0.42f, 1.0f},
+};
+
+void computeLightPositions(float time, float outPositions[LIGHT_COUNT * 3]) {
+    for (int i = 0; i < LIGHT_COUNT; ++i) {
+        const float phase = static_cast<float>(i) * (2.0f * PI / LIGHT_COUNT);
+        outPositions[i * 3 + 0] = cosf(time * 0.6f + phase) * 4.0f;
+        outPositions[i * 3 + 1] = sinf(time * 0.45f + phase) * 2.0f + 1.6f;
+        outPositions[i * 3 + 2] = sinf(time * 0.5f + phase) * 4.0f;
+    }
+}
+
 DonutMesh buildDonut(float radius, float tube, int majorSegments, int minorSegments) {
     DonutMesh mesh;
     mesh.vertices.reserve(static_cast<size_t>(majorSegments + 1) * (minorSegments + 1) * 8);
